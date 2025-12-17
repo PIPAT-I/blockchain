@@ -1,32 +1,41 @@
 from core.blockchain import Blockchain
+from core.hashing import generate_hash
 
 print("TEST")
 
 art_chain = Blockchain()
 
+# --- Block 1 Data ---
 vector_mona_lisa = [0.12,0.23,0.45,0.67,0.89]
+vector_hash_1 = generate_hash(vector_mona_lisa)
 
+# --- Block 2 & 3 Data ---
 vector_starry_night = [0.88, 0.11, 0.34, 0.76]
+vector_hash_2 = generate_hash(vector_starry_night)
+
 
 print("Adding Block 1 (Mona Lisa)...")
 art_chain.add_block({
     "image_name": "Mona Lisa",
     "owner": "Da Vinci",
-    "vector": vector_mona_lisa
+    "vector": vector_mona_lisa,
+    "vector_hash": vector_hash_1
 })
 
 print("Adding Block 2 (Starry Night)...")
 art_chain.add_block({
     "image_name": "Starry Night",
     "owner": "Van Gogh",
-    "vector": vector_starry_night
+    "vector": vector_starry_night,
+    "vector_hash": vector_hash_2
 })
 
 print("Adding Block 3 (Starry Night)...")
 art_chain.add_block({
     "image_name": "Starry Night",
     "owner": "Van Gogh",
-    "vector": vector_starry_night
+    "vector": vector_starry_night,
+    "vector_hash": vector_hash_2
 })
 
 
