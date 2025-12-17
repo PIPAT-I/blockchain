@@ -13,6 +13,7 @@ class Node:
         """
         self.name = name
         self.blockchain = blockchain_instance
+        self.tokens = 100  # โหนดทุกตัวมี 100 โทเคนเมื่อเริ่มต้น
 
     def search_for_hash(self, vector_hash_to_find: str):
         """

@@ -41,24 +41,34 @@ network = Network(num_nodes=NUMBER_OF_NODES, initial_blockchain=master_blockchai
 # 3. เริ่มส่วน Interactive สำหรับให้ผู้ใช้ป้อนข้อมูลเพื่อตรวจสอบ
 # =================================================================
 print("\n\n--- ระบบตรวจสอบรูปภาพบนเครือข่าย Blockchain ---")
-print("คัดลอก Vector ไปวางเพื่อทดสอบได้เลย")
+print("คำสั่งที่ใช้ได้: 'showchain', 'balances', 'exit'")
 print("ตัวอย่าง Vector ของ 'The Kiss': [0.99, 0.88, 0.77, 0.66, 0.55]")
 print("ตัวอย่าง Vector ที่ไม่มีในระบบ: [1, 2, 3]")
 
 while True:
-    input_vector_str = input("\nป้อนค่า Vector ที่ต้องการตรวจสอบ (ในรูปแบบ list เช่น [0.1, 0.2]) หรือพิมพ์ 'exit' เพื่อจบการทำงาน: ")
+    user_input = input("\nป้อนค่า Vector หรือคำสั่ง: ")
+    command = user_input.lower()
 
-    if input_vector_str.lower() == 'exit':
+    if command == 'exit':
         break
+    
+    elif command == 'showchain':
+        print("\n--- แสดงข้อมูลทั้งหมดใน Blockchain ---")
+        print(network.get_chain_as_json())
+        print("------------------------------------")
 
-    try:
-        # Convert the input string to a Python list
-        input_vector = json.loads(input_vector_str)
-        
-        # เริ่มกระบวนการทั้งหมดผ่าน Network
-        network.start_verification_race(input_vector)
+    elif command == 'balances':
+        network.show_token_balances()
 
-    except json.JSONDecodeError:
-        print("\n[Error] รูปแบบ Vector ไม่ถูกต้อง กรุณาใส่ในรูปแบบ JSON array เช่น [0.1, 0.2, 0.3]")
-    except Exception as e:
-        print(f"\n[Error] เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
+    else:
+        try:
+            # Convert the input string to a Python list
+            input_vector = json.loads(user_input)
+            
+            # เริ่มกระบวนการทั้งหมดผ่าน Network
+            network.start_verification_race(input_vector)
+
+        except json.JSONDecodeError:
+            print("\n[Error] รูปแบบ Vector หรือคำสั่งไม่ถูกต้อง กรุณาใส่ในรูปแบบ JSON array หรือใช้คำสั่ง 'showchain', 'balances', 'exit'")
+        except Exception as e:
+            print(f"\n[Error] เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
