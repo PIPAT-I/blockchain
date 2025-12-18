@@ -16,6 +16,7 @@ from core.network import broadcast_to_peers
 app = Flask(__name__)
 winner_lock = threading.Lock()
 winner_found_for_current_search = False
+voting_timeout = 30  # จำนวนวินาทีรอเสียงจากทั้งหมด
 
 # --- Blockchain Initialization & Node Setup ---
 def seed_blockchain(blockchain: Blockchain):
@@ -153,8 +154,12 @@ def announce_winner():
     with winner_lock:
         if node.state == "SEARCHING":
             print(f"[{node.name}] received winner announcement from {data.get('winner_name')}. Stopping search.")
-            node.state = "VOTING"
+            node.state = "AWAITING_VOTES"
             node.current_winner_info = data
+            
+            # เริ่ม timeout timer สำหรับ voting
+            timeout_thread = threading.Thread(target=start_voting_timeout, daemon=True)
+            timeout_thread.start()
         else:
             print(f"[{node.name}] ignored a winner announcement from {data.get('winner_name')} because its state is already '{node.state}'.")
     return jsonify({"message": "Announcement processed."})
@@ -195,42 +200,93 @@ def receive_vote():
         total_voters = len(node.peers)
         if len(node.votes) >= total_voters:
             print("All votes are in! Tallying results based on stake...")
-            
-            balances = node.blockchain.get_balances()
-            
-            total_voting_stake = sum(balances.get(voter_addr, 0) for voter_addr in node.votes.keys())
-            yes_stake = sum(balances.get(voter_addr, 0) for voter_addr, vote_cast in node.votes.items() if vote_cast == 'YES')
-            
-            print(f"Tally: YES stake = {yes_stake}, Total voting stake = {total_voting_stake}")
-
-            all_nodes = node.peers.copy()
-            all_nodes.add(node.get_address())
-
-            if total_voting_stake == 0 or (yes_stake / total_voting_stake) > 0.5:
-                print(">>> CONSENSUS REACHED: Vote passes! <<<")
-                
-                verified_data = node.current_winner_info['result_data']
-                
-                rewards = {node.get_address(): 10}
-                for voter_addr, vote_cast in node.votes.items():
-                    if vote_cast == 'YES':
-                        rewards[voter_addr] = rewards.get(voter_addr, 0) + 1
-                
-                print(f"Distributing rewards: {rewards}")
-
-                new_block_data = {
-                    "type": "CONSENSUS_RESULT",
-                    "result": verified_data,
-                    "rewards": rewards
-                }
-                node.blockchain.add_block(new_block_data)
-                
-                sync_payload = {"chain": [b.__dict__ for b in node.blockchain.chain]}
-                broadcast_to_peers(all_nodes, '/sync-chain', sync_payload)
-            else:
-                print(">>> CONSENSUS FAILED: Vote does not pass. <<<")
-                broadcast_to_peers(all_nodes, '/round-over', {"status": "failed"})
+            tally_votes()
     return jsonify({"message": "Vote received."})
+
+def tally_votes():
+    """
+    นับคะแนนเสียง โดยถ่วงน้ำหนักตามจำนวน Token (Stake)
+    และใช้ Slashing ในกรณีที่ vote ไม่ถูกต้อง
+    """
+    balances = node.blockchain.get_balances()
+    
+    total_voting_stake = sum(balances.get(voter_addr, 0) for voter_addr in node.votes.keys())
+    yes_stake = sum(balances.get(voter_addr, 0) for voter_addr, vote_cast in node.votes.items() if vote_cast == 'YES')
+    yes_count = sum(1 for vote_cast in node.votes.values() if vote_cast == 'YES')
+    
+    print(f"Tally: YES stake = {yes_stake}, Total voting stake = {total_voting_stake}")
+
+    all_nodes = node.peers.copy()
+    all_nodes.add(node.get_address())
+
+    consensus_passed = total_voting_stake == 0 or (yes_stake / total_voting_stake) > 0.5
+
+    if consensus_passed:
+        print(">>> CONSENSUS REACHED: Vote passes! <<<")
+        
+        verified_data = node.current_winner_info['result_data']
+        
+        # rewards สำหรับ proposer และ YES voters
+        rewards = {node.get_address(): 10}
+        for voter_addr, vote_cast in node.votes.items():
+            if vote_cast == 'YES':
+                rewards[voter_addr] = rewards.get(voter_addr, 0) + 2
+        
+        # slashing สำหรับ NO voters (พวกเขา vote ผิด)
+        slashing = node.blockchain.calculate_slashing_penalty(
+            node.votes, yes_count, len(node.votes)
+        )
+        
+        print(f"Distributing rewards: {rewards}")
+        print(f"Applying slashing: {slashing}")
+
+        new_block_data = {
+            "type": "CONSENSUS_RESULT",
+            "result": verified_data,
+            "rewards": rewards,
+            "slashing": slashing
+        }
+        node.blockchain.add_block(new_block_data)
+        
+        sync_payload = {"chain": [b.__dict__ for b in node.blockchain.chain]}
+        broadcast_to_peers(all_nodes, '/sync-chain', sync_payload)
+    else:
+        print(">>> CONSENSUS FAILED: Vote does not pass. <<<")
+        
+        # slashing สำหรับ YES voters (พวกเขา vote ผิด)
+        slashing = node.blockchain.calculate_slashing_penalty(
+            node.votes, yes_count, len(node.votes)
+        )
+        
+        print(f"Applying slashing to wrong voters: {slashing}")
+        
+        # สร้าง block เก็บ slashing แม้ว่า consensus จะไม่ผ่าน
+        new_block_data = {
+            "type": "FAILED_CONSENSUS",
+            "slashing": slashing
+        }
+        node.blockchain.add_block(new_block_data)
+        
+        sync_payload = {"chain": [b.__dict__ for b in node.blockchain.chain]}
+        broadcast_to_peers(all_nodes, '/sync-chain', sync_payload)
+        broadcast_to_peers(all_nodes, '/round-over', {"status": "failed"})
+
+def start_voting_timeout():
+    """
+    เริ่มจับเวลา timeout สำหรับการโหวต
+    ถ้าหมดเวลาแล้ว ให้นับคะแนนที่มีอยู่
+    """
+    time.sleep(voting_timeout)
+    
+    with winner_lock:
+        if node.state == "AWAITING_VOTES":
+            print(f"[{node.name}] VOTING TIMEOUT! Tallying votes with what we have...")
+            if node.votes:
+                tally_votes()
+            else:
+                print(f"[{node.name}] No votes received. Consensus failed.")
+                reset_state()
+
 
 @app.route('/sync-chain', methods=['POST'])
 def sync_chain():
