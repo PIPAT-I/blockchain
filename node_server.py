@@ -45,36 +45,42 @@ def seed_blockchain(blockchain: Blockchain):
 
 def search_for_hash(blockchain: Blockchain, vector_hash_to_find: str):
     for block in blockchain.chain[1:]:
-        if 'vector_hash' in block.data and block.data['vector_hash'] == vector_hash_to_find:
+        if 'vector_hash' in block.data and block.data.get('vector_hash') == vector_hash_to_find:
             return block.data
+        if isinstance(block.data, dict):
+            result_data = block.data.get("result", {})
+            if isinstance(result_data, dict) and result_data.get('vector_hash') == vector_hash_to_find:
+                return result_data
     return None
 
+# PoS Part 3: Stake-Based Winner Selection
 def perform_search_task(vector_hash: str):
     global winner_found_for_current_search
     print(f"[{node.name}] has started searching for hash: {vector_hash[:10]}...")
+
+    # --- PoS Change: Stake-influenced work time ---
+    balances = node.blockchain.get_balances()
+    my_stake = balances.get(node.get_address(), 1)
+
+    base_work_time = random.uniform(1.0, 5.0)
+    simulated_work_time = base_work_time / (my_stake / 10 if my_stake > 0 else 1)
     
+    print(f"[{node.name}] My stake is {my_stake}. My work time is {simulated_work_time:.2f}s.")
+
     start_time = time.time()
-    simulated_work_time = random.uniform(0.1, 1.0)
     time.sleep(simulated_work_time)
     
     found_data = search_for_hash(node.blockchain, vector_hash)
     time_taken = time.time() - start_time
 
     with winner_lock:
-        # If another thread on this node already found the winner, or
-        # if we have already received an announcement from another node, stand down.
-        if winner_found_for_current_search or node.state == "VOTING":
+        if winner_found_for_current_search or node.state != "SEARCHING":
             print(f"[{node.name}] finished searching, but a winner has already been determined. Standing down.")
             return
 
         winner_found_for_current_search = True
         print(f"\n!!! [{node.name}] is the WINNER! Found data in {time_taken:.4f}s !!!\n")
 
-        # --- BUG FIX ---
-        # The winner sets its own state and info directly,
-        # then broadcasts only to its peers.
-
-        # 1. Prepare winner data
         winner_data = {
             "winner_name": node.name,
             "winner_address": node.get_address(),
@@ -82,22 +88,23 @@ def perform_search_task(vector_hash: str):
             "result_data": found_data,
         }
 
-        # 2. Winner updates its own status
-        node.state = "AWAITING_VOTES" # A new state for the winner
+        node.state = "AWAITING_VOTES"
         node.current_winner_info = winner_data
         
-        # 3. Broadcast to peers only (not to self)
         broadcast_to_peers(node.peers, '/announce-winner', winner_data)
 
 # --- API Endpoints ---
 @app.route('/info', methods=['GET'])
 def get_node_info():
+    balances = node.blockchain.get_balances()
+    node.tokens = balances.get(node.get_address(), 0)
     return jsonify({
         "name": node.name,
         "peers": list(node.peers),
         "tokens": node.tokens,
         "state": node.state,
         "current_winner_info": node.current_winner_info,
+        "all_balances": balances
     })
 
 @app.route('/blockchain', methods=['GET'])
@@ -144,26 +151,18 @@ def perform_local_search():
 def announce_winner():
     data = request.get_json()
     with winner_lock:
-        # A node should only accept a winner announcement if it is still searching.
-        # This prevents a winner from being "demoted" by a later announcement,
-        # and prevents a voter from changing their mind.
         if node.state == "SEARCHING":
             print(f"[{node.name}] received winner announcement from {data.get('winner_name')}. Stopping search.")
             node.state = "VOTING"
             node.current_winner_info = data
         else:
-            # Ignore announcement if node is in any other state (IDLE, VOTING, AWAITING_VOTES, etc.)
             print(f"[{node.name}] ignored a winner announcement from {data.get('winner_name')} because its state is already '{node.state}'.")
     return jsonify({"message": "Announcement processed."})
 
 @app.route('/cast-vote', methods=['POST'])
 def cast_vote():
-    # Defensive check to ensure the node is ready for voting
     if node.state != "VOTING" or not node.current_winner_info:
-        return jsonify({
-            "error": "Node is not in a VOTING state or no winner is known.",
-            "state": node.state
-        }), 409  # 409 Conflict is a good status code for a state mismatch
+        return jsonify({"error": "Node is not in a VOTING state or no winner is known.", "state": node.state}), 409
 
     data = request.get_json()
     if 'vote' not in data or data['vote'] not in ['YES', 'NO']:
@@ -183,10 +182,10 @@ def cast_vote():
     node.state = "VOTED"
     return jsonify({"message": "Vote cast successfully."})
 
+# PoS Part 1 & 2: Verifiable Balances & Stake-Weighted Voting
 @app.route('/receive-vote', methods=['POST'])
 def receive_vote():
     data = request.get_json()
-    # Only the winner should process votes
     if node.current_winner_info and node.get_address() == node.current_winner_info.get('winner_address'):
         voter = data['voter_address']
         vote = data['vote']
@@ -195,30 +194,38 @@ def receive_vote():
 
         total_voters = len(node.peers)
         if len(node.votes) >= total_voters:
-            print("All votes are in! Tallying results...")
-            votes_yes = sum(1 for v in node.votes.values() if v == 'YES')
+            print("All votes are in! Tallying results based on stake...")
             
+            balances = node.blockchain.get_balances()
+            
+            total_voting_stake = sum(balances.get(voter_addr, 0) for voter_addr in node.votes.keys())
+            yes_stake = sum(balances.get(voter_addr, 0) for voter_addr, vote_cast in node.votes.items() if vote_cast == 'YES')
+            
+            print(f"Tally: YES stake = {yes_stake}, Total voting stake = {total_voting_stake}")
+
             all_nodes = node.peers.copy()
             all_nodes.add(node.get_address())
 
-            if total_voters == 0 or (votes_yes / total_voters) > 0.5:
+            if total_voting_stake == 0 or (yes_stake / total_voting_stake) > 0.5:
                 print(">>> CONSENSUS REACHED: Vote passes! <<<")
-                verified_data = node.current_winner_info['result_data']
-                node.blockchain.add_block(verified_data)
                 
-                # Calculate rewards
-                rewards = {node.get_address(): 10} # Winner's reward
+                verified_data = node.current_winner_info['result_data']
+                
+                rewards = {node.get_address(): 10}
                 for voter_addr, vote_cast in node.votes.items():
                     if vote_cast == 'YES':
                         rewards[voter_addr] = rewards.get(voter_addr, 0) + 1
                 
                 print(f"Distributing rewards: {rewards}")
-                
-                # Sync the updated chain and rewards with all peers
-                sync_payload = {
-                    "chain": [b.__dict__ for b in node.blockchain.chain],
+
+                new_block_data = {
+                    "type": "CONSENSUS_RESULT",
+                    "result": verified_data,
                     "rewards": rewards
                 }
+                node.blockchain.add_block(new_block_data)
+                
+                sync_payload = {"chain": [b.__dict__ for b in node.blockchain.chain]}
                 broadcast_to_peers(all_nodes, '/sync-chain', sync_payload)
             else:
                 print(">>> CONSENSUS FAILED: Vote does not pass. <<<")
@@ -228,26 +235,26 @@ def receive_vote():
 @app.route('/sync-chain', methods=['POST'])
 def sync_chain():
     data = request.get_json()
-    new_chain_data = data['chain']
-    rewards = data.get('rewards', {})
+    new_chain_data = data.get('chain', [])
 
-    # Update tokens based on rewards
-    my_reward = rewards.get(node.get_address())
-    if my_reward:
-        node.tokens += my_reward
-        print(f"[{node.name}] received {my_reward} tokens! New balance: {node.tokens}")
-
-    # Sync chain
     if len(new_chain_data) > len(node.blockchain.chain):
-        node.blockchain.chain = [Block(**b) for b in new_chain_data]
-        print(f"[{node.name}] successfully synced blockchain. New length: {len(node.blockchain.chain)}")
+        potential_new_chain = Blockchain()
+        potential_new_chain.chain = [Block(**b) for b in new_chain_data]
+
+        if potential_new_chain.is_chain_valid():
+             node.blockchain.chain = potential_new_chain.chain
+             new_balances = node.blockchain.get_balances()
+             node.tokens = new_balances.get(node.get_address(), 0)
+             print(f"[{node.name}] successfully synced blockchain. New length: {len(node.blockchain.chain)}. My new balance: {node.tokens}")
+             reset_state()
+        else:
+             print(f"[{node.name}] received an invalid chain. Discarding.")
+             return jsonify({"error": "Invalid chain received"}), 400
     
-    reset_state()
     return jsonify({"message": "Chain synced."})
 
 @app.route('/round-over', methods=['POST'])
 def round_over():
-    """Endpoint to signify a round has ended (e.g., consensus failed)."""
     print(f"[{node.name}] received round-over signal.")
     reset_state()
     return jsonify({"message": "Round over."})
@@ -276,11 +283,7 @@ if __name__ == '__main__':
 
     node_name = f"Node-{port}"
 
-    # --- ADDRESSING FIX ---
-    # The listen_host is always 0.0.0.0 to accept connections from any interface.
     listen_host = '0.0.0.0'
-    # The public_host is the address that this node announces to others.
-    # In Docker, this is the service name. Outside Docker, it's localhost.
     public_host = os.environ.get('NODE_HOST', '127.0.0.1')
     
     node = Node(
@@ -299,7 +302,6 @@ if __name__ == '__main__':
             for peer in peers:
                 node.add_peer(peer.strip())
     
-    # The print statement should show the address others can use to connect
     print(f"Starting {node.name} at {node.get_address()}")
     print(f"Listening on {listen_host}:{port}")
     print(f"Known peers: {node.peers}")
