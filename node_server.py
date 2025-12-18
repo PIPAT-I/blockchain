@@ -16,6 +16,7 @@ from core.network import broadcast_to_peers
 app = Flask(__name__)
 winner_lock = threading.Lock()
 winner_found_for_current_search = False
+VOTING_TIMEOUT = 30 # Voting timeout in seconds
 
 # --- Blockchain Initialization & Node Setup ---
 def seed_blockchain(blockchain: Blockchain):
@@ -53,12 +54,70 @@ def search_for_hash(blockchain: Blockchain, vector_hash_to_find: str):
                 return result_data
     return None
 
-# PoS Part 3: Stake-Based Winner Selection
+# --- PoS & Timeout Logic ---
+
+def tally_votes():
+    """
+    Calculates the consensus result based on stake-weighted votes.
+    This function should only be called after acquiring the winner_lock.
+    """
+    # Prevent double-tallying if called by both timeout and full vote completion
+    if node.state != "AWAITING_VOTES":
+        return
+
+    print("Tallying results based on stake...")
+    
+    balances = node.blockchain.get_balances()
+    
+    total_voting_stake = sum(balances.get(voter_addr, 0) for voter_addr in node.votes.keys())
+    yes_stake = sum(balances.get(voter_addr, 0) for voter_addr, vote_cast in node.votes.items() if vote_cast == 'YES')
+    
+    print(f"Tally: YES stake = {yes_stake}, Total voting stake = {total_voting_stake}")
+
+    all_nodes = node.peers.copy()
+    all_nodes.add(node.get_address())
+
+    # Consensus is reached if more than 50% of the stake that voted agrees
+    if total_voting_stake > 0 and (yes_stake / total_voting_stake) > 0.5:
+        print(">>> CONSENSUS REACHED: Vote passes! <<<")
+        
+        verified_data = node.current_winner_info['result_data']
+        
+        rewards = {node.get_address(): 10}
+        for voter_addr, vote_cast in node.votes.items():
+            if vote_cast == 'YES':
+                rewards[voter_addr] = rewards.get(voter_addr, 0) + 1
+        
+        print(f"Distributing rewards: {rewards}")
+
+        new_block_data = {
+            "type": "CONSENSUS_RESULT",
+            "result": verified_data,
+            "rewards": rewards
+        }
+        node.blockchain.add_block(new_block_data)
+        
+        sync_payload = {"chain": [b.__dict__ for b in node.blockchain.chain]}
+        broadcast_to_peers(all_nodes, '/sync-chain', sync_payload)
+    else:
+        print(">>> CONSENSUS FAILED: Vote does not pass or no votes received. <<<")
+        broadcast_to_peers(all_nodes, '/round-over', {"status": "failed"})
+
+def vote_timeout_manager(round_id_for_timeout):
+    time.sleep(VOTING_TIMEOUT)
+    with winner_lock:
+        # Check if the round has already ended or we are no longer the winner
+        if node.round_id != round_id_for_timeout or node.state != "AWAITING_VOTES":
+            print(f"[TimeoutThread] Round {round_id_for_timeout} already concluded or state changed. Exiting.")
+            return
+
+        print(f"\n!!! Voting for round {round_id_for_timeout} has timed out after {VOTING_TIMEOUT} seconds. Tallying results now... !!!\n")
+        tally_votes()
+
 def perform_search_task(vector_hash: str):
     global winner_found_for_current_search
     print(f"[{node.name}] has started searching for hash: {vector_hash[:10]}...")
 
-    # --- PoS Change: Stake-influenced work time ---
     balances = node.blockchain.get_balances()
     my_stake = balances.get(node.get_address(), 1)
 
@@ -91,6 +150,12 @@ def perform_search_task(vector_hash: str):
         node.state = "AWAITING_VOTES"
         node.current_winner_info = winner_data
         
+        # Start the voting timer
+        print(f"[{node.name}] Starting {VOTING_TIMEOUT}s voting timer for round {node.round_id}...")
+        timer_thread = threading.Thread(target=vote_timeout_manager, args=(node.round_id,))
+        timer_thread.daemon = True
+        timer_thread.start()
+
         broadcast_to_peers(node.peers, '/announce-winner', winner_data)
 
 # --- API Endpoints ---
@@ -103,6 +168,7 @@ def get_node_info():
         "peers": list(node.peers),
         "tokens": node.tokens,
         "state": node.state,
+        "round_id": node.round_id,
         "current_winner_info": node.current_winner_info,
         "all_balances": balances
     })
@@ -182,54 +248,21 @@ def cast_vote():
     node.state = "VOTED"
     return jsonify({"message": "Vote cast successfully."})
 
-# PoS Part 1 & 2: Verifiable Balances & Stake-Weighted Voting
 @app.route('/receive-vote', methods=['POST'])
 def receive_vote():
-    data = request.get_json()
-    if node.current_winner_info and node.get_address() == node.current_winner_info.get('winner_address'):
-        voter = data['voter_address']
-        vote = data['vote']
-        node.votes[voter] = vote
-        print(f"[{node.name}] collected vote '{vote}' from {voter}")
+    with winner_lock:
+        if node.current_winner_info and node.get_address() == node.current_winner_info.get('winner_address'):
+            data = request.get_json()
+            voter = data['voter_address']
+            vote = data['vote']
+            node.votes[voter] = vote
+            print(f"[{node.name}] collected vote '{vote}' from {voter}")
 
-        total_voters = len(node.peers)
-        if len(node.votes) >= total_voters:
-            print("All votes are in! Tallying results based on stake...")
-            
-            balances = node.blockchain.get_balances()
-            
-            total_voting_stake = sum(balances.get(voter_addr, 0) for voter_addr in node.votes.keys())
-            yes_stake = sum(balances.get(voter_addr, 0) for voter_addr, vote_cast in node.votes.items() if vote_cast == 'YES')
-            
-            print(f"Tally: YES stake = {yes_stake}, Total voting stake = {total_voting_stake}")
-
-            all_nodes = node.peers.copy()
-            all_nodes.add(node.get_address())
-
-            if total_voting_stake == 0 or (yes_stake / total_voting_stake) > 0.5:
-                print(">>> CONSENSUS REACHED: Vote passes! <<<")
-                
-                verified_data = node.current_winner_info['result_data']
-                
-                rewards = {node.get_address(): 10}
-                for voter_addr, vote_cast in node.votes.items():
-                    if vote_cast == 'YES':
-                        rewards[voter_addr] = rewards.get(voter_addr, 0) + 1
-                
-                print(f"Distributing rewards: {rewards}")
-
-                new_block_data = {
-                    "type": "CONSENSUS_RESULT",
-                    "result": verified_data,
-                    "rewards": rewards
-                }
-                node.blockchain.add_block(new_block_data)
-                
-                sync_payload = {"chain": [b.__dict__ for b in node.blockchain.chain]}
-                broadcast_to_peers(all_nodes, '/sync-chain', sync_payload)
-            else:
-                print(">>> CONSENSUS FAILED: Vote does not pass. <<<")
-                broadcast_to_peers(all_nodes, '/round-over', {"status": "failed"})
+            # If all expected votes are in, tally immediately without waiting for timeout.
+            total_voters = len(node.peers)
+            if len(node.votes) >= total_voters:
+                print("All votes received before timeout. Tallying now.")
+                tally_votes()
     return jsonify({"message": "Vote received."})
 
 @app.route('/sync-chain', methods=['POST'])
@@ -271,7 +304,8 @@ def reset_state():
         node.state = "IDLE"
         node.current_winner_info = None
         node.votes = {}
-    print(f"[{node.name}] has been reset to IDLE state.")
+        node.round_id += 1 # Increment round ID for the next round
+    print(f"[{node.name}] has been reset to IDLE state for round {node.round_id}.")
 
 # --- Main Execution ---
 if __name__ == '__main__':

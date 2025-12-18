@@ -9,6 +9,7 @@ class Node:
         self.blockchain = Blockchain()
         self.peers = set()
         self.tokens = 100
+        self.round_id = 0 # Add round_id to track consensus rounds
         
         # State management for the voting process
         self.state = "IDLE"  # Can be IDLE, SEARCHING, VOTING, AWAITING_VOTES
