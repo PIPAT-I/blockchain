@@ -1,16 +1,17 @@
 from core.blockchain import Blockchain
 
 class Node:
-    def __init__(self, name: str, host: str, port: int):
+    def __init__(self, name: str, listen_host: str, public_host: str, port: int):
         self.name = name
-        self.host = host
+        self.listen_host = listen_host
+        self.public_host = public_host
         self.port = port
         self.blockchain = Blockchain()
         self.peers = set()
         self.tokens = 100
         
         # State management for the voting process
-        self.state = "IDLE"  # Can be IDLE, SEARCHING, VOTING
+        self.state = "IDLE"  # Can be IDLE, SEARCHING, VOTING, AWAITING_VOTES
         self.current_winner_info = None
         self.votes = {} # To store votes for the current round, e.g., {'node_url': 'YES'}
 
@@ -18,4 +19,4 @@ class Node:
         self.peers.add(peer_address)
 
     def get_address(self):
-        return f"http://{self.host}:{self.port}"
+        return f"http://{self.public_host}:{self.port}"

@@ -1,5 +1,6 @@
 import json
 import sys
+import os
 import requests
 import threading
 import time
@@ -60,19 +61,33 @@ def perform_search_task(vector_hash: str):
     time_taken = time.time() - start_time
 
     with winner_lock:
-        if not winner_found_for_current_search:
-            winner_found_for_current_search = True
-            print(f"\n!!! [{node.name}] is the WINNER! Found data in {time_taken:.4f}s !!!\n")
+        # If another thread on this node already found the winner, or
+        # if we have already received an announcement from another node, stand down.
+        if winner_found_for_current_search or node.state == "VOTING":
+            print(f"[{node.name}] finished searching, but a winner has already been determined. Standing down.")
+            return
 
-            winner_data = {
-                "winner_name": node.name,
-                "winner_address": node.get_address(),
-                "time_taken": time_taken,
-                "result_data": found_data,
-            }
-            all_peers = node.peers.copy()
-            all_peers.add(node.get_address())
-            broadcast_to_peers(all_peers, '/announce-winner', winner_data)
+        winner_found_for_current_search = True
+        print(f"\n!!! [{node.name}] is the WINNER! Found data in {time_taken:.4f}s !!!\n")
+
+        # --- BUG FIX ---
+        # The winner sets its own state and info directly,
+        # then broadcasts only to its peers.
+
+        # 1. Prepare winner data
+        winner_data = {
+            "winner_name": node.name,
+            "winner_address": node.get_address(),
+            "time_taken": time_taken,
+            "result_data": found_data,
+        }
+
+        # 2. Winner updates its own status
+        node.state = "AWAITING_VOTES" # A new state for the winner
+        node.current_winner_info = winner_data
+        
+        # 3. Broadcast to peers only (not to self)
+        broadcast_to_peers(node.peers, '/announce-winner', winner_data)
 
 # --- API Endpoints ---
 @app.route('/info', methods=['GET'])
@@ -129,22 +144,44 @@ def perform_local_search():
 def announce_winner():
     data = request.get_json()
     with winner_lock:
-        if node.state != "VOTING":
-            print(f"[{node.name}] received winner announcement from {data.get('winner_name')}")
+        # A node should only accept a winner announcement if it is still searching.
+        # This prevents a winner from being "demoted" by a later announcement,
+        # and prevents a voter from changing their mind.
+        if node.state == "SEARCHING":
+            print(f"[{node.name}] received winner announcement from {data.get('winner_name')}. Stopping search.")
             node.state = "VOTING"
             node.current_winner_info = data
-    return jsonify({"message": "Announcement received."})
+        else:
+            # Ignore announcement if node is in any other state (IDLE, VOTING, AWAITING_VOTES, etc.)
+            print(f"[{node.name}] ignored a winner announcement from {data.get('winner_name')} because its state is already '{node.state}'.")
+    return jsonify({"message": "Announcement processed."})
 
 @app.route('/cast-vote', methods=['POST'])
 def cast_vote():
+    # Defensive check to ensure the node is ready for voting
+    if node.state != "VOTING" or not node.current_winner_info:
+        return jsonify({
+            "error": "Node is not in a VOTING state or no winner is known.",
+            "state": node.state
+        }), 409  # 409 Conflict is a good status code for a state mismatch
+
     data = request.get_json()
+    if 'vote' not in data or data['vote'] not in ['YES', 'NO']:
+        return jsonify({"error": "Invalid vote. It must be 'YES' or 'NO'."}), 400
+
     vote_payload = {"voter_address": node.get_address(), "vote": data['vote']}
     
     winner_address = node.current_winner_info.get('winner_address')
-    requests.post(f"{winner_address}/receive-vote", json=vote_payload)
+    if not winner_address:
+        return jsonify({"error": "Could not determine winner's address."}), 500
+
+    try:
+        requests.post(f"{winner_address}/receive-vote", json=vote_payload, timeout=3)
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"Failed to send vote to winner: {e}"}), 502
 
     node.state = "VOTED"
-    return jsonify({"message": "Vote cast."})
+    return jsonify({"message": "Vote cast successfully."})
 
 @app.route('/receive-vote', methods=['POST'])
 def receive_vote():
@@ -238,7 +275,20 @@ if __name__ == '__main__':
             port = int(sys.argv[port_index])
 
     node_name = f"Node-{port}"
-    node = Node(name=node_name, host='0.0.0.0', port=port)
+
+    # --- ADDRESSING FIX ---
+    # The listen_host is always 0.0.0.0 to accept connections from any interface.
+    listen_host = '0.0.0.0'
+    # The public_host is the address that this node announces to others.
+    # In Docker, this is the service name. Outside Docker, it's localhost.
+    public_host = os.environ.get('NODE_HOST', '127.0.0.1')
+    
+    node = Node(
+        name=node_name,
+        listen_host=listen_host,
+        public_host=public_host,
+        port=port
+    )
 
     seed_blockchain(node.blockchain)
 
@@ -249,7 +299,9 @@ if __name__ == '__main__':
             for peer in peers:
                 node.add_peer(peer.strip())
     
-    print(f"Starting {node.name} at http://{node.host}:{node.port}")
+    # The print statement should show the address others can use to connect
+    print(f"Starting {node.name} at {node.get_address()}")
+    print(f"Listening on {listen_host}:{port}")
     print(f"Known peers: {node.peers}")
 
-    app.run(host=node.host, port=port, debug=False, threaded=True)
+    app.run(host=listen_host, port=port, debug=False, threaded=True)
