@@ -35,6 +35,23 @@ class Blockchain:
         # 3. เพิ่ม block ใหม่เข้าไปใน chain
         self.chain.append(new_block)
 
+    def get_balances(self):
+        # In a real system, the initial distribution would be part of the genesis block.
+        # For this simulation, we'll start with a hardcoded initial state.
+        balances = {
+            'http://node1:5001': 100,
+            'http://node2:5002': 100,
+            'http://node3:5003': 100,
+            'http://node4:5004': 100,
+        }
+
+        # Iterate through the chain to update balances based on rewards in each block
+        for block in self.chain[1:]: # Skip genesis block
+            if isinstance(block.data, dict) and block.data.get("type") == "CONSENSUS_RESULT":
+                rewards = block.data.get("rewards", {})
+                for address, reward in rewards.items():
+                    balances[address] = balances.get(address, 0) + reward
+        return balances
 
     def is_chain_valid(self):
        

@@ -4,15 +4,17 @@ from datetime import datetime
 
 
 class Block: 
-    def __init__(self, index ,timestamp , data, previous_hash):
+    def __init__(self, index ,timestamp , data, previous_hash, hash=None):
 
         self.index = index  # ลำดับของ block
         self.timestamp = str(timestamp)  # วันที่และเวลาที่ block ถูกสร้าง
         self.data = data  # ข้อมูลที่ถูกเก็บใน block
         self.previous_hash = previous_hash # hash ของ block ที่อยู่ก่อนหน้า
 
-
-        self.hash = self.calculate_hash() # ค่า hash ของ block
+        if hash is None:
+            self.hash = self.calculate_hash() # ค่า hash ของ block
+        else:
+            self.hash = hash
 
     def calculate_hash(self):
 
