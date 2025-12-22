@@ -85,8 +85,7 @@ def tally_votes():
         
         rewards = {node.get_address(): 10}
         for voter_addr, vote_cast in node.votes.items():
-            if vote_cast == 'YES':
-                rewards[voter_addr] = rewards.get(voter_addr, 0) + 1
+            rewards[voter_addr] = rewards.get(voter_addr, 0) + 1
         
         print(f"Distributing rewards: {rewards}")
 
@@ -101,7 +100,25 @@ def tally_votes():
         broadcast_to_peers(all_nodes, '/sync-chain', sync_payload)
     else:
         print(">>> CONSENSUS FAILED: Vote does not pass or no votes received. <<<")
-        broadcast_to_peers(all_nodes, '/round-over', {"status": "failed"})
+        
+        # Distribute participation rewards even on failure
+        rewards = {}  # No special winner reward on failure
+        for voter_addr, vote_cast in node.votes.items():
+            rewards[voter_addr] = rewards.get(voter_addr, 0) + 1
+
+        if rewards:
+            print(f"Distributing participation rewards for failed consensus: {rewards}")
+            new_block_data = {
+                "type": "CONSENSUS_FAILED",
+                "rewards": rewards
+            }
+            node.blockchain.add_block(new_block_data)
+            
+            sync_payload = {"chain": [b.__dict__ for b in node.blockchain.chain]}
+            broadcast_to_peers(all_nodes, '/sync-chain', sync_payload)
+        else:
+            # If no one voted, just end the round
+            broadcast_to_peers(all_nodes, '/round-over', {"status": "failed"})
 
 def vote_timeout_manager(round_id_for_timeout):
     time.sleep(VOTING_TIMEOUT)

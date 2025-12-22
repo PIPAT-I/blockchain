@@ -46,11 +46,13 @@ class Blockchain:
         }
 
         # Iterate through the chain to update balances based on rewards in each block
-        for block in self.chain[1:]: # Skip genesis block
-            if isinstance(block.data, dict) and block.data.get("type") == "CONSENSUS_RESULT":
-                rewards = block.data.get("rewards", {})
-                for address, reward in rewards.items():
-                    balances[address] = balances.get(address, 0) + reward
+        for block in self.chain[1:]:  # Skip genesis block
+            if isinstance(block.data, dict):
+                block_type = block.data.get("type")
+                if block_type in ["CONSENSUS_RESULT", "CONSENSUS_FAILED"]:
+                    rewards = block.data.get("rewards", {})
+                    for address, reward in rewards.items():
+                        balances[address] = balances.get(address, 0) + reward
         return balances
 
     def is_chain_valid(self):
